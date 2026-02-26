@@ -64,6 +64,7 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GH_TOKEN: ${{ secrets.PORTFOLIO_GITHUB_TOKEN }}
+          PORTFOLIO_REPO: ${{ secrets.PORTFOLIO_REPO }}
         run: |
           CMD="python orchestrator.py apply-fixes --portfolio-dir ./portfolio"
 
