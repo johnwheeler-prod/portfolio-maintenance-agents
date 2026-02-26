@@ -1,0 +1,15 @@
+{
+  "last_audit_date": "2026-02-25",
+  "scores": {
+    "performance": 55,
+    "accessibility": 96,
+    "best_practices": 100,
+    "seo": 100
+  },
+  "finding_count": 5,
+  "quick_wins": [
+    "Fix redirect chain to eliminate 780ms delay - likely a server configuration change",
+    "Remove unused JavaScript libraries - audit package.json and eliminate unnecessary dependencies",
+    "Fix color contrast issues by darkening text or lightening backgrounds to meet WCAG standards"
+  ]
+}

@@ -1,0 +1,91 @@
+name: Monthly Content Pipeline
+
+on:
+  schedule:
+    # 1st of every month at 8:00 AM UTC
+    - cron: "0 8 1 * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Use sample data instead of live API calls"
+        required: false
+        type: boolean
+        default: false
+      days:
+        description: "GSC lookback window in days"
+        required: false
+        type: number
+        default: 28
+
+jobs:
+  content-pipeline:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+      issues: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Checkout portfolio
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.PORTFOLIO_REPO }}
+          token: ${{ secrets.PORTFOLIO_GITHUB_TOKEN }}
+          path: portfolio
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run content pipeline
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GSC_PROPERTY_URL: ${{ secrets.GSC_PROPERTY_URL }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          SITEMAP="${{ secrets.PORTFOLIO_URL }}/sitemap-index.xml"
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            python orchestrator.py content-pipeline --dry-run --create-issue
+          else
+            python orchestrator.py content-pipeline \
+              --days ${{ inputs.days || 28 }} \
+              --sitemap-url "$SITEMAP" \
+              --portfolio-dir ./portfolio \
+              --create-issue
+          fi
+
+      - name: Commit outputs
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add outputs/
+          git diff --cached --quiet || git commit -m "Add content pipeline outputs [skip ci]"
+          git pull --rebase
+          git push
+
+      - name: Commit portfolio drafts
+        if: ${{ inputs.dry_run != true }}
+        run: |
+          cd portfolio
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add src/content/blog/drafts/
+          git diff --cached --quiet || git commit -m "Add content brief drafts [skip ci]"
+          git push
+
+      - name: Upload briefs as artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: content-briefs-${{ github.run_id }}
+          path: outputs/content_briefs/
+          retention-days: 90

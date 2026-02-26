@@ -1,0 +1,15 @@
+{
+  "description": "Fallback queries used when GSC returns no data. Edit this list to match your target topics.",
+  "queries": [
+    {"query": "aeo for small business", "clicks": 0, "impressions": 0, "ctr": 0, "position": null},
+    {"query": "seo for small business", "clicks": 0, "impressions": 0, "ctr": 0, "position": null},
+    {"query": "answer engine optimization", "clicks": 0, "impressions": 0, "ctr": 0, "position": null},
+    {"query": "how to get found by ai search", "clicks": 0, "impressions": 0, "ctr": 0, "position": null},
+    {"query": "small business website seo", "clicks": 0, "impressions": 0, "ctr": 0, "position": null},
+    {"query": "structured data for small business", "clicks": 0, "impressions": 0, "ctr": 0, "position": null},
+    {"query": "google search console for beginners", "clicks": 0, "impressions": 0, "ctr": 0, "position": null},
+    {"query": "content strategy for developers", "clicks": 0, "impressions": 0, "ctr": 0, "position": null},
+    {"query": "seo vs aeo differences", "clicks": 0, "impressions": 0, "ctr": 0, "position": null},
+    {"query": "what is answer engine optimization", "clicks": 0, "impressions": 0, "ctr": 0, "position": null}
+  ]
+}

@@ -1,0 +1,38 @@
+# Environment
+.env
+venv/
+.venv/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Google service account credentials — ignore all JSON except explicitly tracked files
+*.json
+!config/seed_queries.json
+!memory/last_audit_state.json
+!dashboard/**
+
+# Outputs — track JSON reports only; ignore all other output files.
+# Parent directories must be un-ignored so git traverses into them,
+# otherwise negation rules on files inside them have no effect.
+outputs/**
+!outputs/
+!outputs/**/
+!outputs/**/*.json
+!outputs/**/.gitkeep
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Claude Code local settings
+.claude/

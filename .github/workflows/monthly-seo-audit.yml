@@ -1,0 +1,136 @@
+name: Monthly SEO/AEO Audit
+
+on:
+  schedule:
+    # First day of every month at 9:00 AM UTC
+    - cron: "0 9 1 * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Audit mode: 'page' for single page, 'site' for full sitemap"
+        required: false
+        type: choice
+        options:
+          - site
+          - page
+        default: site
+      page_url:
+        description: "The page URL to audit (page mode only)"
+        required: false
+        type: string
+      sitemap_url:
+        description: "Sitemap URL (site mode)"
+        required: false
+        type: string
+        default: ""
+      dry_run:
+        description: "Use sample data instead of live API calls"
+        required: false
+        type: boolean
+        default: false
+      days:
+        description: "GSC lookback window in days"
+        required: false
+        type: number
+        default: 28
+      stale_months:
+        description: "Pages older than this many months are considered stale (site mode)"
+        required: false
+        type: number
+        default: 3
+      include_patterns:
+        description: "Comma-separated glob patterns to include (site mode)"
+        required: false
+        type: string
+      exclude_patterns:
+        description: "Comma-separated glob patterns to exclude (site mode)"
+        required: false
+        type: string
+
+jobs:
+  seo-audit:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+      issues: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run SEO audit (page mode)
+        if: inputs.mode == 'page'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GSC_PROPERTY_URL: ${{ secrets.GSC_PROPERTY_URL }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PAGE_URL="${{ inputs.page_url || secrets.PORTFOLIO_URL }}"
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            python orchestrator.py seo-audit --page-url "$PAGE_URL" --dry-run --create-issue
+          else
+            python orchestrator.py seo-audit --page-url "$PAGE_URL" --days ${{ inputs.days || 28 }} --create-issue
+          fi
+
+      - name: Run SEO audit (site mode)
+        if: inputs.mode != 'page'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GSC_PROPERTY_URL: ${{ secrets.GSC_PROPERTY_URL }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          SITEMAP="${{ inputs.sitemap_url }}"
+          CMD="python orchestrator.py site-audit --sitemap-url $SITEMAP --stale-months ${{ inputs.stale_months || 3 }} --days ${{ inputs.days || 28 }} --create-issue"
+
+          # Add include patterns
+          if [ -n "${{ inputs.include_patterns }}" ]; then
+            IFS=',' read -ra PATTERNS <<< "${{ inputs.include_patterns }}"
+            for pat in "${PATTERNS[@]}"; do
+              CMD="$CMD --include \"$(echo $pat | xargs)\""
+            done
+          fi
+
+          # Add exclude patterns
+          if [ -n "${{ inputs.exclude_patterns }}" ]; then
+            IFS=',' read -ra PATTERNS <<< "${{ inputs.exclude_patterns }}"
+            for pat in "${PATTERNS[@]}"; do
+              CMD="$CMD --exclude \"$(echo $pat | xargs)\""
+            done
+          fi
+
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            CMD="$CMD --dry-run"
+          fi
+
+          eval $CMD
+
+      - name: Commit outputs
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add outputs/
+          git diff --cached --quiet || git commit -m "Add SEO audit outputs [skip ci]"
+          git pull --rebase
+          git push
+
+      - name: Upload report as artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: seo-audit-${{ github.run_id }}
+          path: |
+            outputs/seo_audits/
+            outputs/site_audits/
+          retention-days: 90

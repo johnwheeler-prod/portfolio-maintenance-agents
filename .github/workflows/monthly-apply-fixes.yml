@@ -1,0 +1,100 @@
+name: Monthly Apply Fixes
+
+on:
+  workflow_run:
+    workflows: ["Monthly SEO/AEO Audit"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Use sample patches, skip git/PR operations"
+        required: false
+        type: boolean
+        default: false
+      categories:
+        description: "Comma-separated categories (default: all)"
+        required: false
+        type: string
+      audit_date:
+        description: "Audit date to use (default: latest)"
+        required: false
+        type: string
+
+jobs:
+  apply-fixes:
+    runs-on: ubuntu-latest
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout my-agents
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Clone portfolio
+        run: |
+          git clone https://x-access-token:${{ secrets.PORTFOLIO_GITHUB_TOKEN }}@github.com/${{ secrets.PORTFOLIO_REPO }}.git portfolio
+          cd portfolio
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install pnpm
+        run: corepack enable && corepack prepare pnpm@9.6.0 --activate
+
+      - name: Install portfolio dependencies
+        run: cd portfolio && pnpm install --frozen-lockfile
+
+      - name: Run apply-fixes
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ secrets.PORTFOLIO_GITHUB_TOKEN }}
+        run: |
+          CMD="python orchestrator.py apply-fixes --portfolio-dir ./portfolio"
+
+          if [ -n "${{ inputs.categories }}" ]; then
+            CMD="$CMD --categories ${{ inputs.categories }}"
+          fi
+
+          if [ -n "${{ inputs.audit_date }}" ]; then
+            CMD="$CMD --audit-date ${{ inputs.audit_date }}"
+          fi
+
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            CMD="$CMD --dry-run"
+          fi
+
+          eval $CMD
+
+      - name: Commit outputs
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add outputs/
+          git diff --cached --quiet || git commit -m "Add apply-fixes outputs [skip ci]"
+          git pull --rebase
+          git push
+
+      - name: Upload patches as artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fix-patches-${{ github.run_id }}
+          path: outputs/fix_patches/
+          if-no-files-found: ignore
+          retention-days: 90
