@@ -368,6 +368,7 @@ Add these in your repo's **Settings > Secrets and variables > Actions**:
 | `PORTFOLIO_URL` | Your site's root URL (e.g. `https://yoursite.com`) — used by content pipeline and portfolio audit |
 | `PORTFOLIO_REPO` | Your portfolio repo in `owner/repo` format (e.g. `your-username/your-portfolio`) — used by content pipeline and apply-fixes |
 | `PORTFOLIO_GITHUB_TOKEN` | Fine-grained PAT for your portfolio repo — Contents read/write for apply-fixes PRs and content pipeline draft commits |
+| `SITEMAP_URL` | Your sitemap URL (e.g. `https://yoursite.com/sitemap-index.xml`) — used by the site-audit workflow when no URL is provided at dispatch time |
 
 `GITHUB_TOKEN` is provided automatically by GitHub Actions — no need to add it.
 

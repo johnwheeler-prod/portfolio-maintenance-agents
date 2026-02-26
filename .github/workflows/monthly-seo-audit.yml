@@ -90,9 +90,13 @@ jobs:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           GSC_PROPERTY_URL: ${{ secrets.GSC_PROPERTY_URL }}
           GH_TOKEN: ${{ github.token }}
+          SITEMAP_URL: ${{ secrets.SITEMAP_URL }}
         run: |
-          SITEMAP="${{ inputs.sitemap_url }}"
-          CMD="python orchestrator.py site-audit --sitemap-url $SITEMAP --stale-months ${{ inputs.stale_months || 3 }} --days ${{ inputs.days || 28 }} --create-issue"
+          SITEMAP="${{ inputs.sitemap_url || '' }}"
+          if [ -z "$SITEMAP" ]; then
+            SITEMAP="$SITEMAP_URL"
+          fi
+          CMD="python orchestrator.py site-audit --sitemap-url \"$SITEMAP\" --stale-months ${{ inputs.stale_months || 3 }} --days ${{ inputs.days || 28 }} --create-issue"
 
           # Add include patterns
           if [ -n "${{ inputs.include_patterns }}" ]; then
