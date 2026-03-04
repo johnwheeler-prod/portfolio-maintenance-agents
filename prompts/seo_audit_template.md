@@ -30,6 +30,10 @@ Only include a finding if you are confident the issue is actually present based 
 
 Severity guide: **high** = issue that meaningfully impairs crawlability, indexing, or rankings (missing title, broken schema, blocked crawl). **medium** = clear gap that a search engineer would fix (thin meta description, missing H1, no schema where one is clearly warranted). **low** = minor polish only (phrasing tweaks, optional enhancements). When in doubt, go lower.
 
+**Meta content quality bar — do not flag if already acceptable:** A meta description is acceptable and should NOT be flagged if ALL three are true: (a) 120–160 characters long, (b) contains at least one keyword that matches the page's primary topic or target queries, (c) accurately describes what the reader will find. If all three hold, do not include a finding — not even at "low" severity. Acceptable wording variations, higher CTR alternatives, and style preferences are not findings. Only flag a meta description if it is missing, fewer than 80 characters, over 170 characters, keyword-free, or factually misrepresents the page.
+
+**Title quality bar:** A page title is acceptable if it is 30–70 characters and contains the page's primary keyword. Do not flag for alternative wording.
+
 ## Output Format
 Respond ONLY with valid JSON matching this exact schema. No prose, no markdown code fences.
 {
