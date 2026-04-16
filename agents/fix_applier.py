@@ -166,6 +166,117 @@ def generate_fixes_dry_run(category: str) -> dict[str, Any]:
     }
 
 
+PORTFOLIO_CATEGORY_LABELS = {
+    "accessibility": "accessibility fixes",
+    "performance": "performance improvements",
+    "seo": "SEO improvements",
+    "best_practices": "best practices improvements",
+}
+
+
+def generate_portfolio_fixes(
+    category: str,
+    findings: list[dict[str, Any]],
+    source_files: dict[str, str],
+    site_url: str = os.environ.get("PORTFOLIO_URL", "https://yoursite.com"),
+) -> dict[str, Any]:
+    """Generate code patches for a category of PSI/Lighthouse portfolio findings.
+
+    Like generate_fixes() but uses portfolio_fix_applier_template.md and the
+    PSI finding schema (audit_id, current_value, detail).
+
+    Args:
+        category: The fix category (accessibility, performance, seo, best_practices).
+        findings: List of finding dicts from the portfolio audit report.
+        source_files: Dict of {relative_path: file_content} for relevant files.
+        site_url: The target site URL for context.
+
+    Returns:
+        Parsed JSON dict with category, pr_title, pr_description, and patches.
+    """
+    label = PORTFOLIO_CATEGORY_LABELS.get(category, category)
+    print(f"[fix_applier] Generating portfolio fixes for: {label}")
+
+    source_block = _format_source_files(source_files)
+
+    prompt = load_prompt(
+        "portfolio_fix_applier_template.md",
+        category=label,
+        findings_json=json.dumps(findings, indent=2),
+        source_files=source_block,
+        site_url=site_url,
+    )
+
+    result = call_claude_json(prompt, max_tokens=16384)
+
+    patch_count = len(result.get("patches", []))
+    print(f"[fix_applier] Generated {patch_count} portfolio patch(es)")
+    return result
+
+
+def generate_portfolio_fixes_dry_run(category: str) -> dict[str, Any]:
+    """Return sample patches for dry-run testing of the portfolio fix pipeline.
+
+    Produces structurally valid output matching the Claude response schema.
+
+    Args:
+        category: The fix category (accessibility, performance, seo, best_practices).
+
+    Returns:
+        A dict matching the fix applier JSON schema with sample patches.
+    """
+    print(f"[fix_applier] DRY RUN — generating sample portfolio patches for: {category}")
+
+    if category == "accessibility":
+        return {
+            "category": "accessibility",
+            "pr_title": "Fix color contrast accessibility issues",
+            "pr_description": (
+                "## Summary\n"
+                "- Darken text colors in global stylesheet to meet WCAG AA "
+                "contrast ratio (4.5:1)\n"
+                "- Targets elements with insufficient contrast identified by PSI audit\n\n"
+                "Addresses `color-contrast` audit failure reported by Lighthouse."
+            ),
+            "patches": [
+                {
+                    "file": "src/styles/global.css",
+                    "action": "replace",
+                    "content": "[MOCK] Updated global.css with improved color contrast values",
+                }
+            ],
+        }
+
+    if category == "performance":
+        return {
+            "category": "performance",
+            "pr_title": "Add preload hints for critical resources",
+            "pr_description": (
+                "## Summary\n"
+                "- Add `<link rel=\"preload\">` hints for critical fonts in head template\n"
+                "- Enable image optimization in build config\n\n"
+                "Addresses source-addressable performance findings from PSI audit. "
+                "Redirect chain and JS bundle size issues require infrastructure changes "
+                "and are not included."
+            ),
+            "patches": [
+                {
+                    "file": "src/layouts/base.html",
+                    "action": "replace",
+                    "content": "[MOCK] Updated base layout with resource preload hints",
+                }
+            ],
+        }
+
+    # Fallback for seo, best_practices, and unknown categories
+    return {
+        "category": category,
+        "pr_title": f"[MOCK] Fix {category} issues",
+        "pr_description": f"[MOCK] Addresses {category} findings from portfolio PSI audit.",
+        "patches": [],
+    }
+
+
 def fix_build_errors(
     category: str,
     patches: list[dict[str, Any]],

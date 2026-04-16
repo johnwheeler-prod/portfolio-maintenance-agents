@@ -4,7 +4,24 @@
 
 ## Current Action Items
 
-All pipelines are set up and tested. Nothing blocking.
+### Configure apply-portfolio-fixes source files
+
+Edit `config/portfolio_source_files.json` to match your portfolio repo's actual file structure. The file currently has generic placeholder paths — update each category's list so the fix applier reads the right files when generating patches:
+
+```json
+{
+  "accessibility": ["path/to/your/global.css"],
+  "performance": ["path/to/your/head-template"],
+  "seo": ["path/to/your/head-template"],
+  "best_practices": ["path/to/your/head-template", "path/to/build-config"]
+}
+```
+
+After editing, test with: `python orchestrator.py apply-portfolio-fixes --dry-run`
+
+### Update build step in apply-fixes workflows
+
+Both `monthly-apply-fixes.yml` and `monthly-apply-portfolio-fixes.yml` use `npm install` + `npm run build` for the build validation step. Update these to match your portfolio's actual package manager and build command if needed.
 
 ---
 

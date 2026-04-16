@@ -43,7 +43,14 @@ from agents.portfolio_auditor import (
     save_audit_state,
     SAMPLE_PORTFOLIO_CONTENT,
 )
-from agents.fix_applier import fix_build_errors, generate_fixes, generate_fixes_dry_run
+from agents.fix_applier import (
+    fix_build_errors,
+    generate_fixes,
+    generate_fixes_dry_run,
+    generate_portfolio_fixes,
+    generate_portfolio_fixes_dry_run,
+    PORTFOLIO_CATEGORY_LABELS,
+)
 from agents.seo_auditor import (
     fetch_page_content,
     run_audit,
@@ -1794,6 +1801,276 @@ def run_apply_fixes(
     }
 
 
+# ---------------------------------------------------------------------------
+# apply-portfolio-fixes: category → source file mapping (config-driven)
+# ---------------------------------------------------------------------------
+
+def _load_portfolio_source_files_config() -> dict[str, list[str]]:
+    """Load the portfolio source file mapping from config/portfolio_source_files.json.
+
+    Returns:
+        Dict mapping category name to list of relative file paths. Returns an empty
+        dict if the config file is not found, so the pipeline degrades gracefully.
+    """
+    config_path = Path("config") / "portfolio_source_files.json"
+    if not config_path.exists():
+        print(
+            "[orchestrator] config/portfolio_source_files.json not found — "
+            "no source files will be read. Create this file to enable patching."
+        )
+        return {}
+    data = json.loads(config_path.read_text(encoding="utf-8"))
+    # Strip the _comment key if present
+    return {k: v for k, v in data.items() if not k.startswith("_")}
+
+
+PORTFOLIO_CATEGORY_SOURCE_FILES: dict[str, list[str]] = _load_portfolio_source_files_config()
+PORTFOLIO_ALL_CATEGORIES = list(PORTFOLIO_CATEGORY_LABELS.keys())
+
+
+def _find_latest_portfolio_audit_date() -> str | None:
+    """Find the most recent audit date directory in outputs/portfolio_audits/.
+
+    Returns:
+        The date string (YYYY-MM-DD) or None if no audits exist.
+    """
+    audits_dir = Path("outputs") / "portfolio_audits"
+    if not audits_dir.exists():
+        return None
+    dates = sorted(
+        (d.name for d in audits_dir.iterdir() if d.is_dir()),
+        reverse=True,
+    )
+    return dates[0] if dates else None
+
+
+def _load_portfolio_findings(audit_date: str) -> list[dict[str, Any]]:
+    """Load findings from outputs/portfolio_audits/<date>/portfolio_report.json.
+
+    Args:
+        audit_date: The YYYY-MM-DD date string for the audit.
+
+    Returns:
+        Flat list of finding dicts from the portfolio report.
+    """
+    report_path = Path("outputs") / "portfolio_audits" / audit_date / "portfolio_report.json"
+    if not report_path.exists():
+        print(f"[orchestrator] No portfolio report found at {report_path}")
+        return []
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    return report.get("findings", [])
+
+
+def _filter_portfolio_findings_for_category(
+    category: str, findings: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Filter portfolio findings by category and severity.
+
+    Args:
+        category: One of accessibility, performance, seo, best_practices.
+        findings: Full list of findings from the portfolio report.
+
+    Returns:
+        Filtered list of high/medium severity findings for the category.
+    """
+    return [
+        f for f in findings
+        if f.get("category") == category
+        and f.get("severity", "low") in AUTO_PATCH_SEVERITIES
+    ]
+
+
+def run_apply_portfolio_fixes(
+    *,
+    dry_run: bool = False,
+    audit_date: str | None = None,
+    portfolio_dir: str = "../your-portfolio-repo",
+    categories: list[str] | None = None,
+    output_dir: str | None = None,
+) -> dict[str, Any]:
+    """Run the apply-portfolio-fixes pipeline: read PSI findings, generate patches, open PR.
+
+    Steps:
+        1. Resolve audit date (outputs/portfolio_audits/)
+        2. Load findings from portfolio_report.json
+        3. For each category, filter findings + generate patches via generate_portfolio_fixes()
+        4. Validate build per category (same retry logic as run_apply_fixes)
+        5. Open single combined PR via _create_combined_fix_pr()
+
+    Args:
+        dry_run: Use sample patches, skip git/PR operations.
+        audit_date: Which audit date to read findings from (default: latest).
+        portfolio_dir: Path to the portfolio repository.
+        categories: List of categories to process (default: all).
+        output_dir: Custom output directory path.
+
+    Returns:
+        A dict with pipeline results including patches and PR URL.
+    """
+    print("=" * 60)
+    print("PIPELINE: Apply Portfolio Fixes")
+    print("=" * 60)
+
+    requested_categories = categories or PORTFOLIO_ALL_CATEGORIES
+
+    # --- Step 1: Resolve audit date ---
+    print("\n--- Step 1: Resolve Audit Date ---")
+    if audit_date is None:
+        audit_date = _find_latest_portfolio_audit_date()
+        if audit_date is None:
+            print("[orchestrator] No portfolio audits found in outputs/portfolio_audits/")
+            print("[orchestrator] Run 'python orchestrator.py portfolio-audit' first.")
+            return {"pipeline": "apply-portfolio-fixes", "error": "no_audits_found"}
+    print(f"[orchestrator] Using audit date: {audit_date}")
+
+    # --- Step 2: Load findings ---
+    print("\n--- Step 2: Load Portfolio Findings ---")
+    all_findings = _load_portfolio_findings(audit_date)
+    print(f"[orchestrator] Loaded {len(all_findings)} total findings")
+
+    # --- Step 3: Process each category ---
+    today = date.today().isoformat()
+    base_dir = (
+        Path(output_dir) if output_dir
+        else Path("outputs") / "fix_patches" / today / "portfolio"
+    )
+    base_dir.mkdir(parents=True, exist_ok=True)
+
+    results: dict[str, dict[str, Any]] = {}
+    validated_patches: dict[str, list[dict[str, Any]]] = {}
+    category_pr_info: dict[str, tuple[str, str]] = {}
+
+    for cat in requested_categories:
+        print(f"\n--- Category: {cat} ---")
+
+        cat_dir = base_dir / cat
+        cat_dir.mkdir(parents=True, exist_ok=True)
+
+        # Filter findings for this category
+        cat_findings = _filter_portfolio_findings_for_category(cat, all_findings)
+        print(f"[orchestrator] {len(cat_findings)} findings for {cat}")
+
+        if not cat_findings and not dry_run:
+            print(f"[orchestrator] No findings for {cat} — skipping")
+            results[cat] = {"skipped": True, "reason": "no_findings"}
+            continue
+
+        # Generate patches
+        if dry_run:
+            print("[orchestrator] DRY RUN — using sample patches")
+            fix_result = generate_portfolio_fixes_dry_run(cat)
+        else:
+            print(f"[orchestrator] Reading source files from {portfolio_dir}")
+            source_files = _read_source_files(
+                portfolio_dir, cat, source_files_map=PORTFOLIO_CATEGORY_SOURCE_FILES
+            )
+            if not source_files:
+                print(f"[orchestrator] No source files found for {cat} — skipping")
+                results[cat] = {"skipped": True, "reason": "no_source_files"}
+                continue
+
+            site_url = os.environ.get("PORTFOLIO_URL", "https://yoursite.com")
+            fix_result = generate_portfolio_fixes(cat, cat_findings, source_files, site_url)
+
+        # Save patches
+        patches_path = cat_dir / "patches.json"
+        patches_path.write_text(json.dumps(fix_result, indent=2), encoding="utf-8")
+        print(f"[orchestrator] Patches saved to {patches_path}")
+
+        # Validate build per category (if not dry-run), collect for combined PR
+        if not dry_run:
+            patches = fix_result.get("patches", [])
+            if patches:
+                original_contents = _save_originals(portfolio_dir, patches)
+                build_ok = False
+
+                for attempt in range(1 + MAX_BUILD_RETRIES):
+                    _apply_patches(portfolio_dir, patches)
+                    passed, build_output = _run_build_check(portfolio_dir)
+
+                    if passed:
+                        build_ok = True
+                        _restore_files(portfolio_dir, original_contents)
+                        break
+
+                    if attempt < MAX_BUILD_RETRIES:
+                        print(
+                            f"[orchestrator] Build failed (attempt {attempt + 1})"
+                            " — asking Claude to fix"
+                        )
+                        _restore_files(portfolio_dir, original_contents)
+                        fix_result = fix_build_errors(
+                            cat, patches, build_output, source_files
+                        )
+                        patches = fix_result.get("patches", [])
+                        patches_path.write_text(
+                            json.dumps(fix_result, indent=2), encoding="utf-8"
+                        )
+                    else:
+                        print(
+                            f"[orchestrator] Build still failing after"
+                            f" {MAX_BUILD_RETRIES} retries — skipping category"
+                        )
+                        _restore_files(portfolio_dir, original_contents)
+
+                if not build_ok:
+                    results[cat] = {"skipped": True, "reason": "build_failed"}
+                    continue
+
+                validated_patches[cat] = patches
+                category_pr_info[cat] = (
+                    fix_result.get("pr_title", f"Fix portfolio {cat} issues"),
+                    fix_result.get("pr_description", f"Automated fixes for {cat}."),
+                )
+            else:
+                print(f"[orchestrator] No patches generated for {cat} (not source-addressable)")
+
+        results[cat] = {
+            "findings_count": len(cat_findings),
+            "patches_path": str(patches_path),
+            "patches_count": len(fix_result.get("patches", [])),
+            "pr_title": fix_result.get("pr_title"),
+        }
+
+    # --- Create single combined PR for all validated categories ---
+    combined_pr_url = None
+    if not dry_run and validated_patches:
+        print(f"\n--- Creating combined PR for: {', '.join(validated_patches)} ---")
+        combined_pr_url = _create_combined_fix_pr(
+            portfolio_dir,
+            validated_patches,
+            category_pr_info,
+            branch_prefix="fix/portfolio",
+            pr_title_prefix="Monthly portfolio fixes",
+            category_labels=PORTFOLIO_CATEGORY_LABELS,
+        )
+        if combined_pr_url:
+            (base_dir / "pr_url.txt").write_text(combined_pr_url, encoding="utf-8")
+
+    # --- Summary ---
+    print("\n" + "=" * 60)
+    print("PIPELINE COMPLETE")
+    print(f"  Audit date: {audit_date}")
+    print(f"  Categories processed: {len(results)}")
+    for cat, info in results.items():
+        if info.get("skipped"):
+            print(f"  {cat}: skipped ({info.get('reason')})")
+        else:
+            print(f"  {cat}: {info.get('patches_count', 0)} patches")
+    print(f"  Combined PR: {combined_pr_url or 'none'}")
+    print(f"  Output: {base_dir}")
+    print("=" * 60)
+
+    return {
+        "pipeline": "apply-portfolio-fixes",
+        "audit_date": audit_date,
+        "output_dir": str(base_dir),
+        "categories": results,
+        "pr_url": combined_pr_url,
+    }
+
+
 def _extract_blog_posts(sitemap_entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Extract blog post entries from sitemap for internal linking context.
 
@@ -2164,6 +2441,41 @@ def main() -> None:
         help="Create GitHub issues with audit findings.",
     )
 
+    # --- apply-portfolio-fixes subcommand ---
+    portfolio_fixes = subparsers.add_parser(
+        "apply-portfolio-fixes",
+        help="Generate code patches from PSI/Lighthouse portfolio audit findings and open a PR.",
+    )
+    portfolio_fixes.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Use sample patches, skip git/PR operations.",
+    )
+    portfolio_fixes.add_argument(
+        "--audit-date",
+        type=str,
+        default=None,
+        help="Portfolio audit date to read findings from (default: latest).",
+    )
+    portfolio_fixes.add_argument(
+        "--portfolio-dir",
+        type=str,
+        default=None,
+        help="Path to the local checkout of your portfolio repository.",
+    )
+    portfolio_fixes.add_argument(
+        "--categories",
+        type=str,
+        default=None,
+        help="Comma-separated categories: accessibility,performance,seo,best_practices (default: all).",
+    )
+    portfolio_fixes.add_argument(
+        "--output",
+        type=str,
+        default=None,
+        help="Custom output directory.",
+    )
+
     # --- apply-fixes subcommand ---
     fixes = subparsers.add_parser(
         "apply-fixes",
@@ -2251,6 +2563,15 @@ def main() -> None:
             dry_run=args.dry_run,
             audit_date=args.audit_date,
             portfolio_dir=args.portfolio_dir,
+            categories=cats,
+            output_dir=args.output,
+        )
+    elif args.pipeline == "apply-portfolio-fixes":
+        cats = args.categories.split(",") if args.categories else None
+        run_apply_portfolio_fixes(
+            dry_run=args.dry_run,
+            audit_date=args.audit_date,
+            portfolio_dir=args.portfolio_dir or "../your-portfolio-repo",
             categories=cats,
             output_dir=args.output,
         )

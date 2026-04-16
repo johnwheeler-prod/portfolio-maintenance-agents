@@ -1,12 +1,12 @@
-# my-agents
+# portfolio-maintenance-agents
 
-An open-source agent orchestration framework for automating content planning, SEO auditing, and site maintenance on a personal portfolio or blog. You configure it once, point it at your site and repo, and scheduled GitHub Actions pipelines handle the rest: generating content briefs, auditing pages for SEO/AEO issues, and opening PRs with generated fixes — all routed through GitHub Issues for human review before anything changes.
+An open-source agent orchestration framework for automating content planning, SEO auditing, and site maintenance on a personal portfolio or blog. You configure it once, point it at your site and repo, and scheduled GitHub Actions pipelines handle the rest: generating content briefs, auditing pages for SEO/AEO issues, running Lighthouse-based performance audits, and opening PRs with generated fixes — all routed through GitHub Issues for human review before anything changes.
 
 Built for developers who want to automate the repetitive parts of site maintenance without giving up control. Uses Claude as the AI backend, Google Search Console for query data, and GitHub Actions for scheduling. Everything runs in your own repo — no third-party automation platform required.
 
 ## Architecture
 
-The orchestrator coordinates 5 pipelines. Each pipeline chains data-fetching agents with Claude-powered analysis agents. No agent calls another directly — the orchestrator passes JSON outputs forward.
+The orchestrator coordinates 6 pipelines. Each pipeline chains data-fetching agents with Claude-powered analysis agents. No agent calls another directly — the orchestrator passes JSON outputs forward.
 
 ```
                               orchestrator.py
@@ -18,16 +18,16 @@ The orchestrator coordinates 5 pipelines. Each pipeline chains data-fetching age
 
   CONTENT PIPELINE · monthly
   ─────────────────────────────────────────────────────────────────────
-  search_console_fetcher + sitemap fetch
+  search_console_fetcher + ga4_fetcher + sitemap fetch
         │                                    │
         ▼                                    ▼
   content_planner · Claude ·        site_crawler (stale ≥ 10 mo)
   4 briefs + internal linking map          │
-  (existing + new posts)                   ▼
+  (GA4 splits popular vs. weak topics)     ▼
         │                         content_freshness_checker · Claude ·
         ▼                         stale page findings
   create_portfolio_drafts
-  writes .md drafts → [your-portfolio-repo]/src/content/blog/drafts/
+  writes .md drafts → [your-portfolio-repo]/[drafts-path]/
 
 
   SEO/AEO AUDIT · monthly, 1st
@@ -56,11 +56,20 @@ The orchestrator coordinates 5 pipelines. Each pipeline chains data-fetching age
   seo_auditor × page · Claude ·
   per-page reports + site summary
         │
-        └─────────────────────────────────────────────┐
-                                                      │ triggers
-  APPLY FIXES · auto after site audit, or manual      │
-  ────────────────────────────────────────────────────▼────────────────
+        └─────────────────────────────────────────┐
+                                                  │ triggers
+  APPLY FIXES · auto after site audit, or manual  │
+  ──────────────────────────────────────────────────────────────────────
   fix_applier × category · Claude · (build-validated)
+        │
+        ▼
+  single combined PR → [your-portfolio-repo]
+
+
+  APPLY PORTFOLIO FIXES · auto after portfolio audit, or manual
+  ──────────────────────────────────────────────────────────────────────
+  fix_applier × PSI category · Claude · (build-validated)
+  (uses portfolio_fix_applier_template — PSI/Lighthouse finding schema)
         │
         ▼
   single combined PR → [your-portfolio-repo]
@@ -69,11 +78,12 @@ The orchestrator coordinates 5 pipelines. Each pipeline chains data-fetching age
 ## Repo structure
 
 ```
-my-agents/
+portfolio-maintenance-agents/
 ├── orchestrator.py                          # CLI entry point — chains agents into pipelines
 ├── agents/
 │   ├── search_console_fetcher.py            # Pulls query data from Google Search Console
 │   ├── analytics_fetcher.py                 # Pulls per-page query data from GSC
+│   ├── ga4_fetcher.py                       # Pulls per-post pageview data from GA4
 │   ├── content_planner.py                   # Generates 4 content briefs + internal linking via Claude
 │   ├── content_freshness_checker.py         # Flags existing pages ≥10 months old via Claude
 │   ├── pagespeed_fetcher.py                 # Fetches Lighthouse scores via PageSpeed Insights API
@@ -87,7 +97,8 @@ my-agents/
 │   ├── seo_audit_template.md                # SEO/AEO audit per page
 │   ├── portfolio_audit_template.md          # PSI scores + content freshness synthesis
 │   ├── portfolio_freshness_template.md      # Legacy content-only freshness prompt
-│   ├── fix_applier_template.md              # Code patch generation
+│   ├── fix_applier_template.md              # Code patch generation (SEO audit findings)
+│   ├── portfolio_fix_applier_template.md    # Code patch generation (PSI/Lighthouse findings)
 │   └── fix_build_repair_template.md         # Build error correction
 ├── utils/
 │   ├── claude_client.py                     # Reusable Claude API wrapper
@@ -95,25 +106,32 @@ my-agents/
 ├── outputs/                                 # Generated reports (gitignored)
 │   ├── content_briefs/YYYY-MM-DD/
 │   │   ├── gsc_data.json                    # Raw Search Console queries
-│   │   ├── briefs.json                      # 4 content briefs + internal linking
-│   │   └── freshness_report.json            # Stale page findings
+│   │   └── content_briefs.json              # Ranked opportunities with briefs
 │   ├── seo_audits/YYYY-MM-DD/
 │   ├── portfolio_audits/YYYY-MM-DD/
 │   │   ├── psi_data.json                    # Raw PageSpeed Insights response
 │   │   ├── page_content.txt                 # Fetched page text
 │   │   └── portfolio_report.json            # Scored findings + quick wins
 │   ├── site_audits/YYYY-MM-DD/
+│   │   ├── sitemap_data.json                # Full sitemap
+│   │   ├── filtered_urls.json               # URLs that passed freshness filter
+│   │   ├── pages/                           # Per-page audit subdirectories
+│   │   └── site_summary.json                # Aggregated scores + cross-site findings
 │   └── fix_patches/YYYY-MM-DD/
+│       ├── [category]/patches.json          # SEO fix patches (apply-fixes)
+│       └── portfolio/[category]/patches.json # PSI fix patches (apply-portfolio-fixes)
 ├── config/
-│   └── seed_queries.json                    # Fallback queries when GSC returns no data
+│   ├── seed_queries.json                    # Fallback queries when GSC returns no data
+│   └── portfolio_source_files.json          # Maps PSI categories to source files to patch
 ├── memory/
 │   └── last_audit_state.json                # Portfolio audit score history for trend detection
 ├── .github/workflows/
 │   ├── weekly-content-pipeline.yml          # Monthly, 1st of month, 8:00 AM UTC
 │   ├── weekly-portfolio-audit.yml           # Monthly, 7th of month, 9:00 AM UTC
 │   ├── monthly-seo-audit.yml                # Monthly, 1st of month, 9:00 AM UTC
-│   └── monthly-apply-fixes.yml              # After site-audit completes (or manual dispatch)
-├── BRIEF.md                                 # Claude Code session context
+│   ├── monthly-apply-fixes.yml              # After site-audit completes (or manual dispatch)
+│   └── monthly-apply-portfolio-fixes.yml    # After portfolio-audit completes (or manual dispatch)
+├── CLAUDE.md                                # Auto-loaded by Claude Code each session
 ├── NEXT_STEPS.md                            # Pending manual tasks and setup steps
 └── README.md                                # This file
 ```
@@ -127,9 +145,9 @@ Before setting up, make sure you have:
 - **A public XML sitemap** at a stable URL (e.g. `https://yoursite.com/sitemap-index.xml`) with `<lastmod>` dates on each entry — these drive the freshness tracking in the content and site-audit pipelines.
 - **Google Search Console** set up for your domain, with a service account that has Full access (see Setup step 3). This powers the content pipeline's query data. New sites without GSC data will fall back to `config/seed_queries.json`.
 - **Blog posts as markdown files** with at least these frontmatter fields: `title` (string), `description` (string), `pubDate` (Date), `draft` (boolean). `updatedDate` (Date) is optional but improves freshness detection.
-- **A portfolio repository** that this repo can read from and write to. The content pipeline writes draft `.md` files; the apply-fixes pipeline opens PRs. You'll need a fine-grained PAT (`PORTFOLIO_GITHUB_TOKEN`) with Contents read/write on that repo.
+- **A portfolio repository** that this repo can read from and write to. The content pipeline writes draft `.md` files; the apply-fixes pipelines open PRs. You'll need a fine-grained PAT (`PORTFOLIO_GITHUB_TOKEN`) with Contents read/write on that repo.
 
-> **apply-fixes framework note:** The apply-fixes pipeline targets **Astro + pnpm** by default — the build step in `monthly-apply-fixes.yml` runs `pnpm build`, and `prompts/fix_applier_template.md` describes an Astro file structure. If your portfolio uses a different framework, update the build step in the workflow and the file structure description in the prompt template to match.
+> **apply-fixes build step:** Both apply-fixes pipelines run a build check before opening a PR. The default workflow uses `npm install` + `npm run build`. If your portfolio uses a different package manager or build command, update the install and build steps in `monthly-apply-fixes.yml` and `monthly-apply-portfolio-fixes.yml` to match.
 
 ---
 
@@ -140,19 +158,19 @@ Before setting up, make sure you have:
 **Option A: Using the GitHub CLI (fastest)**
 
 ```bash
-cd /path/to/my-agents
-gh repo create my-agents --private --source=. --push
+cd /path/to/portfolio-maintenance-agents
+gh repo create portfolio-maintenance-agents --private --source=. --push
 ```
 
 **Option B: Manual setup on github.com**
 
 1. Go to https://github.com/new
-2. Name it `my-agents`, set to **Private**, do not initialize with README/.gitignore/license
+2. Name it `portfolio-maintenance-agents`, set to **Private**, do not initialize with README/.gitignore/license
 3. In your terminal:
 
 ```bash
-cd /path/to/my-agents
-git remote add origin git@github.com:YOUR_GITHUB_USERNAME/my-agents.git
+cd /path/to/portfolio-maintenance-agents
+git remote add origin git@github.com:YOUR_GITHUB_USERNAME/portfolio-maintenance-agents.git
 git push -u origin main
 ```
 
@@ -162,14 +180,14 @@ Verify with `git remote -v`.
 
 1. Go to https://console.anthropic.com/ and sign in
 2. **API Keys** in the sidebar → **Create Key**
-3. Name it `my-agents`, copy the key (`sk-ant-...`) — you won't see it again
+3. Name it `portfolio-maintenance-agents`, copy the key (`sk-ant-...`) — you won't see it again
 
 ### 3. Set up Google Search Console API access
 
 #### 3a. Create a Google Cloud project
 
 1. Go to https://console.cloud.google.com/
-2. Project dropdown → **New Project** → name it `my-agents` → **Create**
+2. Project dropdown → **New Project** → name it `portfolio-maintenance-agents` → **Create**
 
 #### 3b. Enable the Search Console API
 
@@ -246,13 +264,14 @@ gh label create portfolio-audit --color D93F0B --description "Portfolio freshnes
 
 | Pipeline | Claude calls per run | Automated frequency |
 |---|---|---|
-| Content pipeline | 1 | Biweekly |
+| Content pipeline | 1–2 | Monthly |
 | SEO audit (single page) | 1 | Manual |
-| Portfolio audit | 1 | Weekly |
+| Portfolio audit | 1 | Monthly |
 | Site audit | 1 per page | Monthly |
-| Apply fixes | 1 per category | Monthly (after site-audit) |
+| Apply fixes (SEO) | 1 per category | Monthly (after site-audit) |
+| Apply portfolio fixes | 1 per category | Monthly (after portfolio-audit) |
 
-A single Sonnet call typically costs $0.01–$0.05. The automated runs cost roughly **$0.20–$0.60/month** combined.
+A single Sonnet call typically costs $0.01–$0.05. The automated runs cost roughly **$0.20–$0.80/month** combined.
 
 1. Go to https://console.anthropic.com/settings/limits
 2. Set **Monthly spend limit** to **$5.00** (more than enough)
@@ -262,9 +281,9 @@ A single Sonnet call typically costs $0.01–$0.05. The automated runs cost roug
 
 ## Customizing for Your Site
 
-### BRIEF.md
+### CLAUDE.md
 
-`BRIEF.md` is the Claude Code session context file — it gives Claude background on your project whenever you start a new session. Load it by telling Claude: `"Read BRIEF.md and use it as context for everything we build in this session"`.
+`CLAUDE.md` is automatically read by Claude Code at the start of every session — no prompt needed. It gives Claude background on your project, your stack, and how to collaborate with you.
 
 Before using it, update two sections with your own details:
 
@@ -289,6 +308,21 @@ Add target topics, keywords you want to rank for, and content areas you're inter
 }
 ```
 
+### portfolio_source_files.json
+
+`config/portfolio_source_files.json` tells the `apply-portfolio-fixes` pipeline which source files in your portfolio repo to read when generating patches for each PSI audit category. Edit the file paths to match your site's actual structure:
+
+```json
+{
+  "accessibility": ["src/styles/global.css"],
+  "performance": ["src/layouts/base.html"],
+  "seo": ["src/layouts/base.html"],
+  "best_practices": ["src/layouts/base.html", "config/build.config.js"]
+}
+```
+
+Paths are relative to your portfolio repo root. Files that don't exist are silently skipped.
+
 ### memory/last_audit_state.json
 
 This file ships with example data. Run `python orchestrator.py portfolio-audit` once (with `--dry-run` first to verify the setup, then live) to populate it with your site's actual Lighthouse scores. From that point on, the portfolio audit uses this file for month-over-month trend detection.
@@ -299,7 +333,7 @@ This file ships with example data. Run `python orchestrator.py portfolio-audit` 
 
 ### Content pipeline
 
-Two sub-agents run after the GSC fetch: **content_planner** generates 4 new content briefs with an internal linking map (referencing both new briefs and all existing blog posts by title/slug); **content_freshness_checker** crawls the sitemap, finds pages not updated in 10+ months, and flags stale body-text language. After briefs are generated, **create_portfolio_drafts** writes skeleton `.md` draft files to your portfolio's `src/content/blog/drafts/` with `draft: true` frontmatter. Both outputs are saved and optionally posted as GitHub issues. If GSC returns no data, the pipeline falls back to seed queries from `config/seed_queries.json`.
+Two sub-agents run after the GSC fetch: **content_planner** generates 4 new content briefs with an internal linking map (referencing both new briefs and all existing blog posts by title/slug); **content_freshness_checker** crawls the sitemap, finds pages not updated in 10+ months, and flags stale body-text language. If GA4 is configured (`GA4_PROPERTY_ID`), pageview data is fetched and used to split brief topics between high-traffic pages (refresh/capitalize) and low-traffic pages (build coverage). After briefs are generated, **create_portfolio_drafts** writes skeleton `.md` draft files to your portfolio's drafts directory with `draft: true` frontmatter. Both outputs are saved and optionally posted as GitHub issues. If GSC returns no data, the pipeline falls back to seed queries from `config/seed_queries.json`.
 
 ```bash
 python orchestrator.py content-pipeline                                        # Live run
@@ -334,11 +368,11 @@ python orchestrator.py portfolio-audit --dry-run
 
 **Automated:** Monthly, 7th of the month at 9:00 AM UTC.
 
-### Apply fixes
+### Apply fixes (SEO)
 
-Reads the latest site-audit findings, generates code patches, and opens PRs against your portfolio repo.
+Reads the latest site-audit findings, generates code patches per category (robots.txt, title/meta, schema), validates each against your portfolio's build, and opens a single combined PR.
 
-> **Framework note:** The pipeline defaults to **Astro + pnpm**. For other frameworks, update the `pnpm build` step in `.github/workflows/monthly-apply-fixes.yml` and the file structure description in `prompts/fix_applier_template.md` to match your setup.
+> **Build step:** The workflow defaults to `npm install` + `npm run build`. Update `monthly-apply-fixes.yml` and `prompts/fix_applier_template.md` for your framework and file structure.
 
 ```bash
 python orchestrator.py apply-fixes --dry-run
@@ -348,6 +382,21 @@ python orchestrator.py apply-fixes --audit-date 2026-01-15
 ```
 
 **Automated:** Triggers after the monthly site-audit completes, or via manual dispatch.
+
+### Apply portfolio fixes (PSI/Lighthouse)
+
+Reads the latest portfolio-audit findings, generates code patches per PSI category (accessibility, performance, SEO, best practices), validates each against your portfolio's build, and opens a single combined PR. Source files to read per category are configured in `config/portfolio_source_files.json`.
+
+> **Build step:** Same as apply-fixes — update `monthly-apply-portfolio-fixes.yml` for your framework.
+
+```bash
+python orchestrator.py apply-portfolio-fixes --dry-run
+python orchestrator.py apply-portfolio-fixes --portfolio-dir ../your-portfolio-repo
+python orchestrator.py apply-portfolio-fixes --categories accessibility,performance
+python orchestrator.py apply-portfolio-fixes --audit-date 2026-01-15
+```
+
+**Automated:** Triggers after the monthly portfolio-audit completes, or via manual dispatch.
 
 All pipelines support `--dry-run` (sample data, no API calls) and `--output` (custom output directory). Most support `--create-issue` (opens a GitHub issue with findings).
 
@@ -364,11 +413,12 @@ Add these in your repo's **Settings > Secrets and variables > Actions**:
 | `ANTHROPIC_API_KEY` | Your Anthropic API key (`sk-ant-...`) |
 | `GOOGLE_SERVICE_ACCOUNT_JSON` | Base64-encoded service account JSON |
 | `GSC_PROPERTY_URL` | Your site URL exactly as it appears in GSC |
+| `GA4_PROPERTY_ID` | Numeric GA4 property ID — enables GA4-split brief allocation (optional) |
 | `PAGESPEED_API_KEY` | Google API key with PageSpeed Insights API enabled |
-| `PORTFOLIO_URL` | Your site's root URL (e.g. `https://yoursite.com`) — used by content pipeline and portfolio audit |
-| `PORTFOLIO_REPO` | Your portfolio repo in `owner/repo` format (e.g. `your-username/your-portfolio`) — used by content pipeline and apply-fixes |
-| `PORTFOLIO_GITHUB_TOKEN` | Fine-grained PAT for your portfolio repo — Contents read/write for apply-fixes PRs and content pipeline draft commits |
-| `SITEMAP_URL` | Your sitemap URL (e.g. `https://yoursite.com/sitemap-index.xml`) — used by the site-audit workflow when no URL is provided at dispatch time |
+| `PORTFOLIO_URL` | Your site's root URL (e.g. `https://yoursite.com`) |
+| `PORTFOLIO_REPO` | Your portfolio repo in `owner/repo` format (e.g. `your-username/your-portfolio`) |
+| `PORTFOLIO_GITHUB_TOKEN` | Fine-grained PAT for your portfolio repo — Contents read/write |
+| `SITEMAP_URL` | Your sitemap URL — used by site-audit workflow when no URL is provided at dispatch |
 
 `GITHUB_TOKEN` is provided automatically by GitHub Actions — no need to add it.
 
@@ -385,6 +435,7 @@ Add these in your repo's **Settings > Secrets and variables > Actions**:
 | Monthly Portfolio Audit | 7th of month, 9:00 AM UTC | `weekly-portfolio-audit.yml` |
 | Monthly SEO/AEO Audit | 1st of month, 9:00 AM UTC | `monthly-seo-audit.yml` |
 | Monthly Apply Fixes | After site-audit completes | `monthly-apply-fixes.yml` |
+| Monthly Apply Portfolio Fixes | After portfolio-audit completes | `monthly-apply-portfolio-fixes.yml` |
 
 All workflows support **manual dispatch** from the Actions tab (click **Run workflow**). Use `dry_run: true` for test runs.
 
@@ -407,35 +458,12 @@ python orchestrator.py seo-audit --page-url https://example.com --dry-run
 python orchestrator.py portfolio-audit --dry-run
 python orchestrator.py site-audit --dry-run
 python orchestrator.py apply-fixes --dry-run
+python orchestrator.py apply-portfolio-fixes --dry-run
 ```
 
 Each command should print step-by-step progress and end with `PIPELINE COMPLETE`. Output files appear in `outputs/`.
 
----
-
-## Output structure
-
-All pipeline outputs land in `outputs/` as structured JSON, organized by date:
-
-```
-outputs/
-├── content_briefs/2025-06-15/
-│   ├── gsc_data.json          # Raw Search Console data
-│   └── content_briefs.json    # Ranked opportunities with briefs
-├── seo_audits/2025-06-15/
-│   ├── page_content.txt       # Fetched page HTML
-│   ├── gsc_data.json          # Per-page query data
-│   └── seo_report.json        # Scored findings + quick wins
-├── portfolio_audits/2025-06-15/
-│   └── portfolio_report.json  # Freshness score + suggested copy
-├── site_audits/2025-06-15/
-│   ├── sitemap_data.json      # Full sitemap
-│   ├── filtered_urls.json     # URLs that passed freshness filter
-│   ├── pages/                 # Per-page audit subdirectories
-│   └── site_summary.json      # Aggregated scores + cross-site findings
-└── fix_patches/2025-06-15/
-    └── *.patch                # Generated code patches
-```
+Note: the apply-fixes dry-run requires a prior audit output to exist (`outputs/site_audits/` for `apply-fixes`, `outputs/portfolio_audits/` for `apply-portfolio-fixes`). Run the corresponding audit pipeline first, or with `--dry-run` to create sample output.
 
 ---
 
@@ -443,11 +471,12 @@ outputs/
 
 | Component | Estimated monthly cost |
 |---|---|
-| Monthly content pipeline (2–3 Claude calls + draft commits) | $0.02–$0.15 |
+| Monthly content pipeline (1–2 Claude calls + draft commits) | $0.02–$0.15 |
 | Monthly portfolio audit (PSI free + 1 Claude call) | $0.01–$0.05 |
 | Monthly site audit (1 Claude call per page) | $0.10–$0.50 |
-| Monthly apply-fixes (1 Claude call per category) | $0.05–$0.25 |
-| **Total** | **$0.18–$0.90** |
+| Monthly apply-fixes (1 Claude call per SEO category) | $0.03–$0.15 |
+| Monthly apply-portfolio-fixes (1 Claude call per PSI category) | $0.04–$0.20 |
+| **Total** | **$0.20–$1.05** |
 
 Set a $5/month hard cap on the [Anthropic dashboard](https://console.anthropic.com/settings/limits).
 
@@ -477,5 +506,7 @@ Follow the existing pattern: agents are pure functions that take data in and ret
 **Google Search Console returns empty data** — Check that `GSC_PROPERTY_URL` matches your property exactly (`https://` vs `http://`, `www.` vs no `www.`). Verify the service account email has been added to your GSC property. New properties can take 24–48 hours to start collecting data. The content pipeline will automatically fall back to seed queries from `config/seed_queries.json` so it can still produce useful briefs — edit that file to match your target topics.
 
 **Site audit finds 0 stale pages** — All pages have been updated within the `--stale-months` window (default 3). Try `--stale-months 12`.
+
+**apply-portfolio-fixes skips all categories ("no source files")** — Edit `config/portfolio_source_files.json` so the file paths match your portfolio repo's actual structure.
 
 **GitHub Actions workflow shows as disabled** — Go to the **Actions** tab and click the enable button if prompted. Newly pushed repos sometimes need manual activation.

@@ -1,0 +1,15 @@
+{
+  "_comment": "Map each PSI category to the source files in your portfolio repo that Claude should read when generating patches. Paths are relative to your portfolio repository root. Remove or leave empty any categories you don't want patched automatically.",
+  "accessibility": [
+    "src/styles/global.css"
+  ],
+  "performance": [
+    "src/layouts/base.html"
+  ],
+  "seo": [
+    "src/layouts/base.html"
+  ],
+  "best_practices": [
+    "src/layouts/base.html"
+  ]
+}
