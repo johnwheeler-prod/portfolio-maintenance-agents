@@ -28,18 +28,25 @@ from utils.prompt_loader import load_prompt
 def generate_briefs(
     gsc_data: dict[str, Any],
     existing_posts: list[dict[str, Any]] | None = None,
+    count: int = 4,
+    ga4_data: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Generate content briefs by sending GSC data through Claude.
 
     Loads the content_brief_template.md prompt, populates it with the
-    query data, site URL, and existing blog posts for internal linking,
-    and calls Claude to produce structured content briefs.
+    query data, site URL, existing blog posts for internal linking, and
+    optional GA4 pageview data for popularity-informed brief allocation.
 
     Args:
         gsc_data: The output dict from search_console_fetcher, containing
             'site_url' and 'queries' fields.
         existing_posts: List of dicts with 'url', 'slug', and 'title' keys
             for existing blog posts. Used for internal linking suggestions.
+        count: Number of briefs to generate (default 4). Pass a lower value
+            when existing drafts are already taking up some of the 4-draft cap.
+        ga4_data: Optional output dict from ga4_fetcher, containing a 'posts'
+            list ranked by pageviews. When provided, Claude splits briefs
+            between reinforcing popular topics and shoring up weaker ones.
 
     Returns:
         Parsed JSON dict of content briefs from Claude, matching the
@@ -57,20 +64,33 @@ def generate_briefs(
     if not queries:
         raise ValueError("gsc_data missing 'queries' field or queries list is empty.")
 
-    print(f"[content_planner] Generating briefs for {len(queries)} queries")
+    print(f"[content_planner] Generating {count} brief(s) for {len(queries)} queries")
     print(f"[content_planner] Site: {site_url}")
     if existing_posts:
         print(f"[content_planner] {len(existing_posts)} existing posts available for linking")
+    if ga4_data:
+        post_count = len(ga4_data.get("posts", []))
+        print(f"[content_planner] GA4 pageview data: {post_count} post(s)")
 
     # Format query data as readable JSON for the prompt
     query_data_str = json.dumps(queries, indent=2)
     existing_posts_str = json.dumps(existing_posts or [], indent=2)
+
+    # Format GA4 data — fall back to a note if not provided
+    if ga4_data and ga4_data.get("posts"):
+        post_performance_str = json.dumps(ga4_data["posts"], indent=2)
+    else:
+        post_performance_str = (
+            "Not available — prioritize entirely by GSC impressions and position."
+        )
 
     prompt = load_prompt(
         "content_brief_template.md",
         query_data=query_data_str,
         site_url=site_url,
         existing_posts_json=existing_posts_str,
+        brief_count=str(count),
+        post_performance_json=post_performance_str,
     )
 
     briefs = call_claude_json(prompt)

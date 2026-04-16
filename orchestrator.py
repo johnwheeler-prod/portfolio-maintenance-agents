@@ -25,12 +25,13 @@ import re
 import subprocess
 import sys
 import time
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 from agents.analytics_fetcher import fetch_page_queries, fetch_page_queries_dry_run
+from agents.ga4_fetcher import fetch_pageviews, fetch_pageviews_dry_run
 from agents.content_freshness_checker import check_freshness, check_freshness_dry_run
 from agents.content_planner import generate_briefs, save_briefs
 from agents.pagespeed_fetcher import fetch_pagespeed, fetch_pagespeed_dry_run
@@ -70,10 +71,17 @@ def run_content_pipeline(
 
     Steps:
         1. Fetch query data from Google Search Console (or sample data)
-        2a. content_planner — generate 4 new content briefs with internal linking
+        1b. Fetch GA4 pageview data (optional, skipped if GA4_PROPERTY_ID unset)
+        2a. content_planner — generate up to 4 new content briefs with internal
+            linking (capped so total drafts in portfolio never exceeds 4)
         2b. content_freshness_checker — flag pages ≥ 10 months old for refresh
         3. Save both outputs
         4. Optionally create GitHub issues for both sub-agent outputs
+
+    Draft cap: when portfolio_dir is provided, the pipeline counts existing
+    draft .md files in src/content/blog/drafts/ and only generates enough new
+    briefs to bring the total to 4. If 4 drafts already exist, the content
+    planner step is skipped entirely.
 
     The two sub-agents are independent: content_planner uses GSC query data to
     identify new content opportunities; content_freshness_checker uses the
@@ -117,6 +125,25 @@ def run_content_pipeline(
     gsc_path.write_text(json.dumps(gsc_data, indent=2), encoding="utf-8")
     print(f"[orchestrator] GSC data saved to {gsc_path}")
 
+    # --- Step 1b: Fetch GA4 pageview data ---
+    # Used to split briefs between reinforcing popular topics and shoring up weak ones.
+    # Gracefully skipped if GA4_PROPERTY_ID is not configured.
+    print("\n--- Step 1b: Fetch GA4 Pageview Data ---")
+    ga4_data: dict[str, Any] | None = None
+    if dry_run:
+        ga4_data = fetch_pageviews_dry_run()
+    elif os.getenv("GA4_PROPERTY_ID"):
+        try:
+            ga4_data = fetch_pageviews()
+            ga4_path = intermediate_dir / "ga4_data.json"
+            ga4_path.write_text(json.dumps(ga4_data, indent=2), encoding="utf-8")
+            print(f"[orchestrator] {len(ga4_data.get('posts', []))} post(s) → {ga4_path}")
+        except Exception as exc:
+            print(f"[orchestrator] GA4 fetch failed ({exc}) — continuing without pageview data")
+            ga4_data = None
+    else:
+        print("[orchestrator] GA4_PROPERTY_ID not set — skipping pageview fetch")
+
     # Fetch sitemap once — used by both sub-agents below
     sitemap_entries: list[dict[str, Any]] = []
     if sitemap_url and not dry_run:
@@ -124,14 +151,37 @@ def run_content_pipeline(
         sitemap_entries = fetch_sitemap(sitemap_url)
         print(f"[orchestrator] {len(sitemap_entries)} sitemap entries loaded")
 
+    # --- Draft cap check (before Step 2a) ---
+    # Never exceed 4 drafts in the portfolio at once. Count what's already there
+    # and only generate enough new briefs to fill the remaining slots.
+    DRAFT_CAP = 4
+    STALE_DAYS = 60
+    brief_slots = DRAFT_CAP  # default: generate a full set
+    if portfolio_dir and not dry_run:
+        existing_draft_count = _count_existing_drafts(portfolio_dir)
+        brief_slots = max(0, DRAFT_CAP - existing_draft_count)
+        print(
+            f"[orchestrator] Draft cap check: {existing_draft_count} existing draft(s), "
+            f"{brief_slots} slot(s) available (cap={DRAFT_CAP})"
+        )
+        _warn_stale_drafts(portfolio_dir, stale_days=STALE_DAYS)
+        if brief_slots == 0:
+            print(
+                "[orchestrator] Draft cap reached — skipping content brief generation. "
+                "Publish or delete existing drafts before the next run."
+            )
+
     # --- Step 2a: Generate content briefs (content_planner sub-agent) ---
     print("\n--- Step 2a: Generate Content Briefs (content_planner) ---")
-    if dry_run:
+    if brief_slots == 0 and not dry_run:
+        print("[orchestrator] Skipping — no draft slots available")
+        briefs: dict[str, Any] = {"opportunities": [], "internal_linking_opportunities": []}
+    elif dry_run:
         print("[orchestrator] DRY RUN — skipping Claude API call")
         briefs = _mock_briefs(gsc_data)
     else:
         existing_posts = _extract_blog_posts(sitemap_entries)
-        briefs = generate_briefs(gsc_data, existing_posts=existing_posts)
+        briefs = generate_briefs(gsc_data, existing_posts=existing_posts, count=brief_slots, ga4_data=ga4_data)
 
     briefs_path = save_briefs(briefs, output_dir=str(intermediate_dir))
     print(f"[orchestrator] {len(briefs.get('opportunities', []))} briefs → {briefs_path}")
@@ -1194,20 +1244,75 @@ def _filter_findings_for_category(
     return []
 
 
-def _read_source_files(portfolio_dir: str, category: str) -> dict[str, str]:
+def _count_existing_drafts(portfolio_dir: str) -> int:
+    """Count .md files currently sitting in the portfolio drafts folder.
+
+    Excludes files whose names start with '_' (e.g. _README.md) so
+    permanent fixtures never count against the draft cap.
+
+    Args:
+        portfolio_dir: Path to the portfolio repo root.
+
+    Returns:
+        Number of .md files in src/content/blog/drafts/, or 0 if the
+        directory doesn't exist yet.
+    """
+    drafts_dir = Path(portfolio_dir) / "src" / "content" / "blog" / "drafts"
+    if not drafts_dir.exists():
+        return 0
+    return sum(
+        1 for f in drafts_dir.iterdir()
+        if f.suffix == ".md" and not f.name.startswith("_")
+    )
+
+
+def _warn_stale_drafts(portfolio_dir: str, stale_days: int = 60) -> None:
+    """Print a warning listing any draft files older than stale_days.
+
+    Helps surface forgotten drafts without blocking the pipeline. Files
+    starting with '_' (e.g. _README.md) are excluded from the check.
+
+    Args:
+        portfolio_dir: Path to the portfolio repo root.
+        stale_days: Age threshold in days; drafts older than this are flagged.
+    """
+    drafts_dir = Path(portfolio_dir) / "src" / "content" / "blog" / "drafts"
+    if not drafts_dir.exists():
+        return
+    cutoff = datetime.now().timestamp() - stale_days * 86400
+    stale = [
+        f for f in drafts_dir.iterdir()
+        if f.suffix == ".md"
+        and not f.name.startswith("_")
+        and f.stat().st_mtime < cutoff
+    ]
+    if stale:
+        print(
+            f"[orchestrator] WARNING: {len(stale)} draft(s) are older than "
+            f"{stale_days} days — consider publishing or deleting them:"
+        )
+        for f in sorted(stale):
+            age_days = int((datetime.now().timestamp() - f.stat().st_mtime) / 86400)
+            print(f"  - {f.name} ({age_days}d old)")
+
+
+def _read_source_files(portfolio_dir: str, category: str, source_files_map: dict[str, list[str]] | None = None) -> dict[str, str]:
     """Read the source files relevant to a category from the portfolio repo.
 
     Args:
         portfolio_dir: Path to the portfolio repository root.
         category: The fix category determining which files to read.
+        source_files_map: Optional mapping of category → file paths. Defaults
+            to CATEGORY_SOURCE_FILES if not provided.
 
     Returns:
         Dict of {relative_path: file_content} for existing files.
     """
     source_files: dict[str, str] = {}
     base = Path(portfolio_dir)
+    mapping = source_files_map if source_files_map is not None else CATEGORY_SOURCE_FILES
 
-    for rel_path in CATEGORY_SOURCE_FILES.get(category, []):
+    for rel_path in mapping.get(category, []):
         full_path = base / rel_path
         if full_path.exists():
             source_files[rel_path] = full_path.read_text(encoding="utf-8")
@@ -1314,6 +1419,10 @@ def _create_combined_fix_pr(
     portfolio_dir: str,
     patches_by_category: dict[str, list[dict[str, Any]]],
     category_pr_info: dict[str, tuple[str, str]],
+    *,
+    branch_prefix: str = "fix/seo",
+    pr_title_prefix: str = "Monthly SEO fixes",
+    category_labels: dict[str, str] | None = None,
 ) -> str | None:
     """Apply all category patches to one branch and open a single combined PR.
 
@@ -1326,16 +1435,22 @@ def _create_combined_fix_pr(
             passed build validation.
         category_pr_info: Dict of {category: (pr_title, pr_description)} for
             each category's suggested PR copy.
+        branch_prefix: Git branch name prefix (e.g. "fix/seo" or "fix/portfolio").
+        pr_title_prefix: PR title prefix used when multiple categories are combined.
+        category_labels: Optional label map for human-readable category names in
+            the multi-category PR description. Defaults to CATEGORY_LABELS.
 
     Returns:
         The URL of the created PR, or None if creation failed or no changes exist.
     """
     today = date.today().isoformat()
-    branch = f"fix/seo-{today}"
+    branch = f"{branch_prefix}-{today}"
     repo = os.environ.get("PORTFOLIO_REPO", "")
     if not repo:
         print("[orchestrator] ERROR: PORTFOLIO_REPO environment variable is not set. Cannot create PR.")
         return None
+
+    labels = category_labels if category_labels is not None else CATEGORY_LABELS
 
     # Build combined PR title and description
     categories = list(patches_by_category.keys())
@@ -1343,10 +1458,10 @@ def _create_combined_fix_pr(
         cat = categories[0]
         pr_title, pr_description = category_pr_info[cat]
     else:
-        cat_labels = ", ".join(CATEGORY_LABELS.get(c, c) for c in categories)
-        pr_title = f"Monthly SEO fixes: {cat_labels}"
+        cat_label_str = ", ".join(labels.get(c, c) for c in categories)
+        pr_title = f"{pr_title_prefix}: {cat_label_str}"
         pr_description = "\n\n---\n\n".join(
-            f"## {CATEGORY_LABELS.get(cat, cat)}\n\n{desc}"
+            f"## {labels.get(cat, cat)}\n\n{desc}"
             for cat, (_, desc) in category_pr_info.items()
         )
 
